@@ -1927,3 +1927,970 @@ pdf("figures/ChrCompare/Metastasis_vs_Primary_chr_perMb_Boxplot.pdf", width = 10
 print(p)
 dev.off()
 # save.image("/home/liuyuchen/Projects/eccDNA/workspace.RData")
+
+
+# 加载必要的包
+library(readxl)
+
+#-----------------------------------------
+# 生成各分组的bed文件用于circos图
+#-----------------------------------------
+cat("\n生成各分组的bed文件用于circos图...\n")
+
+# 函数：根据分组信息生成bed文件
+generate_group_bed_files <- function() {
+  # 确保输出目录存在
+  dir.create("figures/ChrCompare", recursive = TRUE, showWarnings = FALSE)
+  
+  # 处理Tumor分组
+  cat("处理Tumor分组...\n")
+  tumor_samples <- group_data$Person[group_data$Tumor == "T"]
+  normal_samples <- group_data$Person[group_data$Tumor == "N"]
+  
+  # 生成Tumor bed文件
+  process_group_samples(tumor_samples, "eccDNA.Tumor.bed")
+  # 生成Normal bed文件
+  process_group_samples(normal_samples, "eccDNA.Normal.bed")
+  
+  # 处理Stage分组
+  cat("处理Stage分组...\n")
+  stage12_samples <- group_data$Person[group_data$Stage %in% c(1, 2)]
+  stage34_samples <- group_data$Person[group_data$Stage %in% c(3, 4)]
+  
+  # 生成Stage bed文件
+  process_group_samples(stage12_samples, "eccDNA.stage12.bed")
+  process_group_samples(stage34_samples, "eccDNA.stage34.bed")
+  
+  # 处理Metastasis分组
+  cat("处理Metastasis分组...\n")
+  metastasis_samples <- group_data$Person[group_data$Metastasis == "M" & !is.na(group_data$Metastasis) & !is.na(group_data$Person)]
+  primary_samples <- group_data$Person[group_data$Metastasis == "T"& !is.na(group_data$Metastasis) & !is.na(group_data$Person)]
+ 
+  # 生成Metastasis bed文件
+  process_group_samples(metastasis_samples, "eccDNA.Metastasis.bed")
+  process_group_samples(primary_samples, "eccDNA.Primary.bed")
+  
+  cat("所有bed文件已生成到figures/ChrCompare目录\n")
+}
+
+# 函数：处理指定分组的样本并生成bed文件
+process_group_samples <- function(samples, output_file) {
+  if (length(samples) == 0) {
+    cat("警告: 没有找到样本，跳过", output_file, "的生成\n")
+    return()
+  }
+  
+  # 合并所有样本的数据
+  all_sample_data <- data.frame()
+  
+  for (sample_name in samples) {
+    rds_file <- file.path("rds_data", paste0(sample_name, ".rds"))
+    
+    if (file.exists(rds_file)) {
+      cat("处理样本:", sample_name, "\n")
+      sample_data <- readRDS(rds_file)
+      
+      # 检查必要的列是否存在
+      if (all(c("X.Chr", "Start", "End") %in% colnames(sample_data))) {
+        # 选择需要的列
+        sample_data_subset <- sample_data %>% dplyr::select(X.Chr, Start, End)
+        all_sample_data <- rbind(all_sample_data, sample_data_subset)
+      } else {
+        cat("警告: 样本", sample_name, "缺少必要的列\n")
+      }
+    } else {
+      cat("警告: RDS文件不存在:", rds_file, "\n")
+    }
+  }
+  
+  # 如果有数据，保存为bed文件
+  if (nrow(all_sample_data) > 0) {
+    output_path <- file.path("figures/ChrCompare", output_file)
+    write.table(all_sample_data, output_path, sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+    cat("已保存:", output_path, " (包含", nrow(all_sample_data), "条记录)\n")
+  } else {
+    cat("警告: 没有找到有效数据，跳过", output_file, "的生成\n")
+  }
+}
+
+# 调用函数生成bed文件
+generate_group_bed_files()
+
+
+
+
+
+# 开始生成circos图，使用顺序结构便于后续调整和验证
+cat("\n开始生成circos图...\n")
+
+# 确保输出目录存在
+output_dir <- "figures/ChrCompare"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# 加载必要的包
+if (!require(circlize)) install.packages("circlize")
+if (!require(tidyverse)) install.packages("tidyverse")
+library(circlize)
+library(tidyverse)
+
+# 读取染色体信息
+cat("读取染色体信息...\n")
+
+# 首先读取hg18_karyotype_data.txt获取染色体基本信息
+if (!file.exists("hg18_karyotype_data.txt")) {
+  stop("未找到hg18_karyotype_data.txt文件！")
+}
+
+# 读取染色体基本信息（5列数据）
+chr_basic <- read.table("hg18_karyotype_data.txt", sep = " ", header = FALSE,
+                      col.names = c("chr", "id", "start", "end", "label"),
+                      stringsAsFactors = FALSE)
+
+cat("成功读取", nrow(chr_basic), "条染色体基本信息\n")
+
+# 然后读取cytoBand.txt获取染色体区带信息
+if (!file.exists("cytoBand.txt")) {
+  stop("未找到cytoBand.txt文件！")
+}
+
+# 读取染色体区带信息（5列数据）
+cytoband <- read.table("cytoBand.txt", sep = "\t", header = FALSE,
+                      col.names = c("chr", "start", "end", "name", "gieStain"),
+                      stringsAsFactors = FALSE)
+
+cat("成功读取", nrow(cytoband), "条染色体区带信息\n")
+
+# 过滤常用染色体
+# 确保染色体名称格式一致并只保留1-22号染色体
+cytoband <- subset(cytoband, chr %in% paste0("chr", 1:22))  # 只保留1-22号染色体，不包含X/Y染色体
+
+# 检查是否成功读取染色体信息
+if (nrow(cytoband) == 0) {
+  warning("未找到有效的1-22号染色体信息，请检查cytoBand.txt文件格式")
+} else {
+  cat("过滤后保留", nrow(cytoband), "条染色体区带信息（1-22号）\n")
+}
+
+# 将bed文件转换为密度数据的代码块
+convert_bed_to_density <- function(bed_file, n_samples) {
+  if (!file.exists(bed_file)) {
+    cat("警告: 文件不存在:", bed_file, "\n")
+    return(NULL)
+  }
+  
+  cat("处理文件:", bed_file, "\n")
+  df <- read.table(bed_file, sep = "\t", header = FALSE,
+                  col.names = c("chrom", "start", "end"),
+                  stringsAsFactors = FALSE)
+  
+  # 过滤X染色体
+  df <- df %>% filter(chrom %in% paste0("chr", 1:22))
+  
+  # 计算1Mb窗口的密度
+  df %>% 
+    mutate(mb_bin = floor(start / 1e6) + 1) %>%
+    group_by(chrom, mb_bin) %>%
+    summarise(count = n(), .groups = "drop") %>%
+    mutate(
+      start = (mb_bin - 1) * 1e6,
+      end = mb_bin * 1e6,
+      density = count / n_samples
+    ) %>%
+    dplyr::select(chrom, start, end, density)
+}
+
+# 读取group_save.xlsx获取样本分组信息
+group_data <- readxl::read_excel("group_save.xlsx")
+
+# 从group_data获取样本数量（添加NA过滤）
+tumor_samples <- group_data$Person[group_data$Tumor == "T" & !is.na(group_data$Tumor) & !is.na(group_data$Person)]
+normal_samples <- group_data$Person[group_data$Tumor == "N" & !is.na(group_data$Tumor) & !is.na(group_data$Person)]
+n_tumor <- length(tumor_samples)
+n_normal <- length(normal_samples)
+
+# 转换bed文件为密度数据
+tumor_density <- convert_bed_to_density(file.path(output_dir, "eccDNA.Tumor.bed"), n_tumor)
+normal_density <- convert_bed_to_density(file.path(output_dir, "eccDNA.Normal.bed"), n_normal)
+
+if (is.null(tumor_density) || is.null(normal_density)) {
+  stop("无法处理bed文件，请检查文件是否存在！")
+}
+
+# 计算平均密度（用于中间文本）
+mean_tumor_density <- round(mean(tumor_density$density), 1)
+mean_normal_density <- round(mean(normal_density$density), 1)
+
+cat("Tumor平均密度:", mean_tumor_density, "per Mb\n")
+cat("Normal平均密度:", mean_normal_density, "per Mb\n")
+
+# 生成Tumor vs Normal的circos图
+
+
+## 条带颜色映射（灰阶 + 着丝粒红） -----------------------------------
+stain_col <- c("gneg"   = "#FAFAFA",
+               "gpos25" = "#D0D0D0",
+               "gpos50" = "#bbb9b9",
+               "gpos75" = "#8d8989",
+               "gpos100"= "#797777",
+               "acen"   = "#E41A1C",   # 着丝粒
+               "gvar"   = "#E0E0E0",
+               "stalk"  = "#E0E0E0")
+
+# 设置pdf输出
+pdf(file.path(output_dir, "circos_TumorNormal.pdf"), width = 8, height = 8)
+
+## 4. 全局参数 ----------------------------------------------------------
+circos.clear()
+circos.par(start.degree = 90, gap.degree = 2.5, track.height = 0.08)
+
+## 5. 初始化染色体 ------------------------------------------------------
+circos.initialize(factors = chr_basic$chr, xlim = cbind(0, chr_basic$end))
+## 7. 染色体标签（圈外） ------------------------------------------------
+circos.track(track.index = 1, ylim = c(0,1), bg.border = NA,
+             panel.fun = function(x, y){
+               chr <- CELL_META$sector.index
+               circos.text(CELL_META$xcenter, -0.4, chr,
+                           facing = "outside", cex = 0.9,
+                           col = "grey20", font = 2)
+             })
+## 6. 画 cytoband 轨道 --------------------------------------------------
+circos.track(track.index = 2, ylim = c(0,1), bg.border = NA,
+             panel.fun = function(x, y) {
+               chr <- CELL_META$sector.index
+               cb  <- cytoband[cytoband$chr == chr, ]
+               for(i in seq_len(nrow(cb))){
+                 circos.rect(cb$start[i], 0, cb$end[i], 1,
+                             col  = stain_col[cb$gieStain[i]],
+                             border = NA)
+               }
+             })
+
+# 绘制Tumor密度图（更显眼）
+max_tumor_density <- max(tumor_density$density) * 1.2
+circos.genomicTrackPlotRegion(
+  tumor_density,
+  ylim = c(0, max_tumor_density),
+  track.height = 0.08,  # 增加轨道高度
+  bg.border = "black",  # 添加边框使其更显眼
+  panel.fun = function(region, value, ...) {
+    # 填充区域使其更显眼
+    circos.genomicRect(region, value, ytop = value$density, ybottom = 0,
+                      col = rgb(231, 27, 28, maxColorValue = 255, alpha = 200),
+                      border = rgb(231, 27, 28, maxColorValue = 255))
+    # 添加线条增强视觉效果
+    circos.genomicLines(region, value, col = rgb(231, 27, 28, maxColorValue = 255),
+                      lwd = 2)  # 增加线宽使其更显眼
+  }
+)
+
+# 绘制Normal密度图（更显眼）
+max_normal_density <- max(normal_density$density) * 1.2
+circos.genomicTrackPlotRegion(
+  normal_density,
+  ylim = c(0, max_normal_density),
+  track.height = 0.08,  # 增加轨道高度
+  bg.border = "black",  # 添加边框使其更显眼
+  panel.fun = function(region, value, ...) {
+    # 填充区域使其更显眼
+    circos.genomicRect(region, value, ytop = value$density, ybottom = 0,
+                      col = rgb(39, 98, 174, maxColorValue = 255, alpha = 200),
+                      border = rgb(39, 98, 174, maxColorValue = 255))
+    # 添加线条增强视觉效果
+    circos.genomicLines(region, value, col = rgb(39, 98, 174, maxColorValue = 255),
+                      lwd = 2)  # 增加线宽使其更显眼
+  }
+)
+
+# 在图中间添加文字
+text(0, 0, 
+     paste0("Mean eccDNA Density per Mb\nTumor: ", mean_tumor_density, "\nNormal: ", mean_normal_density),
+     cex = 1.5,  # 增加字体大小使其更显眼
+     font = 2,   # 粗体
+     col = "black")
+
+# 添加图例
+legend("bottomright", 
+       legend = c("Normal", "Tumor"), 
+       fill = c(rgb(39, 98, 174, maxColorValue = 255), rgb(231, 27, 28, maxColorValue = 255)),
+       border = "black",
+       bty = "n", 
+       cex = 1.5)  # 增加图例大小
+
+circos.clear()
+dev.off()
+
+
+
+
+
+# 函数：从bed文件中筛选特定长度的eccDNA并进行统计分析
+extract_large_eccdna <- function(bed_file, length_thresholds, group_name) {
+  if (!file.exists(bed_file)) {
+    cat("警告: 文件不存在:", bed_file, "\n")
+    return(list())
+  }
+  
+  cat("提取并统计大跨度eccDNA:", bed_file, "\n")
+  df <- read.table(bed_file, sep = "\t", header = FALSE,
+                  col.names = c("chrom", "start", "end"),
+                  stringsAsFactors = FALSE)
+  
+  # 过滤X染色体并计算长度
+  df <- df %>% 
+    filter(chrom %in% paste0("chr", 1:22)) %>%
+    mutate(length = end - start,
+           group = group_name)
+  
+  # 按长度阈值分组
+  result_list <- list()
+  for (threshold in length_thresholds) {
+    key <- paste0("gt_", threshold)
+    result_list[[key]] <- df %>% 
+      filter(length > threshold) %>%
+      dplyr::select(chrom, start, end, length, group)
+    cat("  ", group_name, " - 长度>", threshold, "bp的eccDNA数量:", nrow(result_list[[key]]), "\n")
+  }
+  
+  # 返回完整数据用于统计
+  result_list$all_data <- df
+  
+  return(result_list)
+}
+
+# 函数：进行Tumor vs Normal的长度分布统计和差异分析
+analyze_length_differences <- function(tumor_data, normal_data) {
+  cat("\n进行Tumor vs Normal长度分布差异分析...\n")
+  
+  # 合并数据
+  all_data <- rbind(tumor_data$all_data, normal_data$all_data)
+  
+  # 基本统计
+  tumor_stats <- tumor_data$all_data %>% 
+    summarise(mean_length = mean(length),
+              median_length = median(length),
+              max_length = max(length),
+              n_total = n())
+  
+  normal_stats <- normal_data$all_data %>% 
+    summarise(mean_length = mean(length),
+              median_length = median(length),
+              max_length = max(length),
+              n_total = n())
+  
+  cat("Tumor统计: 平均长度=", round(tumor_stats$mean_length, 1), 
+      ", 中位数=", tumor_stats$median_length, 
+      ", 最大长度=", tumor_stats$max_length, 
+      ", 总数=", tumor_stats$n_total, "\n")
+  cat("Normal统计: 平均长度=", round(normal_stats$mean_length, 1), 
+      ", 中位数=", normal_stats$median_length, 
+      ", 最大长度=", normal_stats$max_length, 
+      ", 总数=", normal_stats$n_total, "\n")
+  
+  # 进行Wilcoxon检验
+  if (nrow(tumor_data$all_data) > 0 && nrow(normal_data$all_data) > 0) {
+    wilcox_test <- wilcox.test(tumor_data$all_data$length, normal_data$all_data$length)
+    cat("Wilcoxon检验p值:", wilcox_test$p.value, "\n")
+    
+    # 计算不同长度区间的比例差异
+    length_categories <- c(1000, 5000, 10000, 50000, 100000, 500000, 1000000)
+    
+    cat("\n长度区间分布差异:\n")
+    for (i in 1:(length(length_categories) - 1)) {
+      lower <- length_categories[i]
+      upper <- length_categories[i + 1]
+      
+      tumor_count <- sum(tumor_data$all_data$length > lower & tumor_data$all_data$length <= upper)
+      normal_count <- sum(normal_data$all_data$length > lower & normal_data$all_data$length <= upper)
+      
+      tumor_prop <- tumor_count / tumor_stats$n_total
+      normal_prop <- normal_count / normal_stats$n_total
+      
+      cat(sprintf("  %d-%d bp: Tumor=%.2f%%, Normal=%.2f%%, 差异=%.2f%%\n", 
+                  lower, upper, tumor_prop*100, normal_prop*100, (tumor_prop-normal_prop)*100))
+    }
+    
+    # 找出差异最显著的长度区间
+    diff_thresholds <- c(10000, 50000, 100000, 500000)
+    best_threshold <- NULL
+    max_diff <- 0
+    
+    for (threshold in diff_thresholds) {
+      tumor_gt <- sum(tumor_data$all_data$length > threshold) / tumor_stats$n_total
+      normal_gt <- sum(normal_data$all_data$length > threshold) / normal_stats$n_total
+      diff <- abs(tumor_gt - normal_gt)
+      
+      if (diff > max_diff && tumor_gt > 0 && normal_gt > 0) {
+        max_diff <- diff
+        best_threshold <- threshold
+      }
+    }
+    
+    if (!is.null(best_threshold)) {
+      cat("\n推荐使用的长度阈值:", best_threshold, "bp (差异最大: ", round(max_diff*100, 1), "%)\n")
+      return(best_threshold)
+    }
+  }
+  
+  # 如果没有找到合适的阈值，返回默认值
+  return(100000)
+}
+
+# 基于实际数据的智能阈值选择
+length_thresholds <- c(50000000)  # 基于实际分布调整 50Mb
+
+# 提取Tumor和Normal中的大跨度eccDNA
+tumor_large_eccdna <- extract_large_eccdna(file.path(output_dir, "eccDNA.Tumor.bed"), length_thresholds, "Tumor")
+normal_large_eccdna <- extract_large_eccdna(file.path(output_dir, "eccDNA.Normal.bed"), length_thresholds, "Normal")
+
+
+
+chr_basic=chr_basic %>% dplyr::filter(chr %in% paste0("chr", 1:22))
+
+# 生成包含大跨度eccDNA弧线的circos图
+pdf(file.path(output_dir, "circos_TumorNormal_large_eccdna.pdf"), width = 10, height = 10)
+
+# 全局参数设置
+circos.clear()
+circos.par(start.degree = 90, gap.degree = 2.5, track.height = 0.08)
+
+# 初始化染色体
+circos.initialize(factors = chr_basic$chr, xlim = cbind(0, chr_basic$end))
+
+# 染色体标签
+circos.track(track.index = 1, ylim = c(0,1), bg.border = NA,
+             panel.fun = function(x, y){
+               chr <- CELL_META$sector.index
+               circos.text(CELL_META$xcenter, -0.4, chr,
+                           facing = "outside", cex = 1.2,
+                           col = "grey20", font = 2)
+             })
+
+# 画cytoband轨道
+circos.track(track.index = 2, ylim = c(0,1), bg.border = NA,
+             panel.fun = function(x, y) {
+               chr <- CELL_META$sector.index
+               cb <- cytoband[cytoband$chr == chr, ]
+               for(i in seq_len(nrow(cb))){
+                 circos.rect(cb$start[i], 0, cb$end[i], 1,
+                             col = stain_col[cb$gieStain[i]],
+                             border = NA)
+               }
+             })
+
+# 绘制Tumor密度图
+max_tumor_density <- max(tumor_density$density) * 1.2
+circos.genomicTrackPlotRegion(
+  tumor_density,
+  ylim = c(0, max_tumor_density),
+  track.height = 0.08,
+  bg.border = "black",
+  panel.fun = function(region, value, ...) {
+    circos.genomicRect(region, value, ytop = value$density, ybottom = 0,
+                      col = rgb(231, 27, 28, maxColorValue = 255, alpha = 200),
+                      border = rgb(231, 27, 28, maxColorValue = 255))
+    circos.genomicLines(region, value, col = rgb(231, 27, 28, maxColorValue = 255),
+                      lwd = 2)
+  }
+)
+
+# 绘制Normal密度图
+max_normal_density <- max(normal_density$density) * 1.2
+circos.genomicTrackPlotRegion(
+  normal_density,
+  ylim = c(0, max_normal_density),
+  track.height = 0.08,
+  bg.border = "black",
+  panel.fun = function(region, value, ...) {
+    circos.genomicRect(region, value, ytop = value$density, ybottom = 0,
+                      col = rgb(39, 98, 174, maxColorValue = 255, alpha = 200),
+                      border = rgb(39, 98, 174, maxColorValue = 255))
+    circos.genomicLines(region, value, col = rgb(39, 98, 174, maxColorValue = 255),
+                      lwd = 2)
+  }
+)
+
+# 绘制大跨度eccDNA弧线，基于实际数据调整抽样策略
+cat("\n绘制大跨度eccDNA弧线...\n")
+
+# 函数：简单绘制所有>1Mb的eccDNA弧线（不采样）
+smart_draw_links <- function(eccdna_data, threshold, color, lwd) {
+  key <- paste0("gt_", threshold)
+
+  # 检查数据是否存在
+  if (!key %in% names(eccdna_data)) {
+    cat("警告: 在eccdna_data中找不到键", key, "\n")
+    return()
+  }
+  
+  # 不进行采样，显示所有数据以体现tumor比normal多
+  data_to_draw <- eccdna_data[[key]]
+  
+  cat("  绘制", nrow(data_to_draw), "条弧线\n")
+  
+  if (nrow(data_to_draw) > 0) {
+    for (i in seq_len(nrow(data_to_draw))) {
+      chr <- data_to_draw$chrom[i]
+      start <- data_to_draw$start[i]
+      end <- data_to_draw$end[i]
+      
+      # 修复：调整h.ratio使弧线更明显，使用正确的RGB格式
+      circos.link(chr, start, chr, end,
+                 col = color,  # 颜色已经包含了alpha值
+                 lwd = lwd,
+                 h.ratio = 0.8)  # 减小h.ratio使弧线更明显
+    }
+  }
+}
+
+# 绘制不同长度阈值的弧线，基于实际数据调整
+cat("\n=== 弧线绘制策略 ===\n")
+
+# 只保留1mb以上的eccDNA弧线 - 超长eccDNA，重点显示
+# 修复：使用正确的RGB格式（alpha在0-1之间）
+smart_draw_links(tumor_large_eccdna, "5e+07", 
+                rgb(231, 27, 28, maxColorValue = 255), 
+                lwd = 0.8)  # 增加线宽使其更明显
+smart_draw_links(normal_large_eccdna, "5e+07", 
+                rgb(39, 98, 174, maxColorValue = 255), 
+                lwd = 0.8)  # 增加线宽使其更明显
+
+# 使用前面已经计算好的平均密度
+# tumor_density和normal_density已经在前面计算过了
+# n_tumor和n_normal也已经在前面计算过了
+
+# 计算各种长度阈值的数量
+count_1mb_tumor <- nrow(tumor_large_eccdna$`gt_5e+07`)
+count_1mb_normal <- nrow(normal_large_eccdna$`gt_5e+07`)
+
+# 在图中间添加详细的统计信息
+text(0, 0, 
+     paste0("Mean eccDNA Density per Mb\n",
+            "Tumor: ", mean_tumor_density, "\n",
+            "Normal: ", mean_normal_density, "\n"),
+     cex = 1.0,
+     font = 2,
+     col = "black")
+
+# 添加简化的图例
+legend("bottomright", 
+       legend = c("Normal density", "Tumor density", 
+                 paste0("Normal >50Mb (", count_1mb_normal, ") "),
+                 paste0("Tumor >50Mb (", count_1mb_tumor, ") ")), 
+       fill = c(rgb(39, 98, 174, maxColorValue = 255, alpha = 200),
+               rgb(231, 27, 28, maxColorValue = 255, alpha = 200),
+               rgb(39, 98, 174, maxColorValue = 255, alpha = 150),
+               rgb(231, 27, 28, maxColorValue = 255, alpha = 150)),
+       border = rep("black", 1),
+       lwd = c(1, 1, 2, 2),
+       bty = "n", 
+       cex = 0.8)
+
+circos.clear()
+dev.off()
+
+#-----------------------------------------------
+
+
+#-------------------------------------------
+
+# 处理Stage分组
+# 基于实际数据的智能阈值选择
+length_thresholds <- c(5000000)  # 基于实际分布调整
+
+# 提取Tumor和Normal中的大跨度eccDNA
+tumor_large_eccdna <- extract_large_eccdna(file.path(output_dir, "eccDNA.Tumor.bed"), length_thresholds, "Tumor")
+normal_large_eccdna <- extract_large_eccdna(file.path(output_dir, "eccDNA.Normal.bed"), length_thresholds, "Normal")
+chr_basic=chr_basic %>% dplyr::filter(chr %in% paste0("chr", 1:22))
+
+# 生成包含大跨度eccDNA弧线的circos图 (Tumor vs Normal)
+pdf(file.path(output_dir, "circos_TumorNormal_large_eccdna.pdf"), width = 10, height = 10)
+
+# 全局参数设置
+circos.clear()
+circos.par(start.degree = 90, gap.degree = 2.5, track.height = 0.08)
+
+# 初始化染色体
+circos.initialize(factors = chr_basic$chr, xlim = cbind(0, chr_basic$end))
+
+# 染色体标签
+circos.track(track.index = 1, ylim = c(0,1), bg.border = NA,
+             panel.fun = function(x, y){
+               chr <- CELL_META$sector.index
+               circos.text(CELL_META$xcenter, -0.4, chr,
+                           facing = "outside", cex = 1.2,
+                           col = "grey20", font = 2)
+             })
+
+# 画cytoband轨道
+circos.track(track.index = 2, ylim = c(0,1), bg.border = NA,
+             panel.fun = function(x, y) {
+               chr <- CELL_META$sector.index
+               cb <- cytoband[cytoband$chr == chr, ]
+               for(i in seq_len(nrow(cb))){  
+                 circos.rect(cb$start[i], 0, cb$end[i], 1,
+                             col = stain_col[cb$gieStain[i]],
+                             border = NA)
+               }
+             })
+
+# 绘制Tumor密度图
+max_tumor_density <- max(tumor_density$density) * 1.2
+circos.genomicTrackPlotRegion(
+  tumor_density,
+  ylim = c(0, max_tumor_density),
+  track.height = 0.08,
+  bg.border = "black",
+  panel.fun = function(region, value, ...) {
+    circos.genomicRect(region, value, ytop = value$density, ybottom = 0,
+                      col = rgb(231, 27, 28, maxColorValue = 255, alpha = 200),
+                      border = rgb(231, 27, 28, maxColorValue = 255))
+    circos.genomicLines(region, value, col = rgb(231, 27, 28, maxColorValue = 255),
+                      lwd = 2)
+  }
+)
+
+# 绘制Normal密度图
+max_normal_density <- max(normal_density$density) * 1.2
+circos.genomicTrackPlotRegion(
+  normal_density,
+  ylim = c(0, max_normal_density),
+  track.height = 0.08,
+  bg.border = "black",
+  panel.fun = function(region, value, ...) {
+    circos.genomicRect(region, value, ytop = value$density, ybottom = 0,
+                      col = rgb(39, 98, 174, maxColorValue = 255, alpha = 200),
+                      border = rgb(39, 98, 174, maxColorValue = 255))
+    circos.genomicLines(region, value, col = rgb(39, 98, 174, maxColorValue = 255),
+                      lwd = 2)
+  }
+)
+
+# 绘制大跨度eccDNA弧线，基于实际数据调整抽样策略
+cat("\n绘制大跨度eccDNA弧线...\n")
+
+# 函数：绘制eccDNA弧线
+smart_draw_links <- function(eccdna_data, threshold, color, lwd) {
+  key <- paste0("gt_", threshold)
+
+  # 检查数据是否存在
+  if (!key %in% names(eccdna_data)) {
+    cat("警告: 在eccdna_data中找不到键", key, "\n")
+    return()
+  }
+  
+  data_to_draw <- eccdna_data[[key]]
+  
+  cat("  绘制", nrow(data_to_draw), "条弧线\n")
+  
+  if (nrow(data_to_draw) > 0) {
+    for (i in seq_len(nrow(data_to_draw))) {
+      chr <- data_to_draw$chrom[i]
+      start <- data_to_draw$start[i]
+      end <- data_to_draw$end[i]
+      
+      circos.link(chr, start, chr, end,
+                 col = color,
+                 border = NA,
+                 lwd = lwd,
+                 h.ratio = 0.6)
+    }
+  }
+}
+
+# 绘制Tumor和Normal的弧线
+smart_draw_links(tumor_large_eccdna, "5e+06", 
+                rgb(231, 27, 28, maxColorValue = 255, alpha = 0.7), 
+                lwd = 1.5)
+smart_draw_links(normal_large_eccdna, "5e+06", 
+                rgb(39, 98, 174, maxColorValue = 255, alpha = 0.7), 
+                lwd = 1.5)
+
+# 计算各种长度阈值的数量
+count_1mb_tumor <- ifelse("gt_5e+06" %in% names(tumor_large_eccdna), nrow(tumor_large_eccdna$`gt_5e+06`), 0)
+count_1mb_normal <- ifelse("gt_5e+06" %in% names(normal_large_eccdna), nrow(normal_large_eccdna$`gt_5e+06`), 0)
+
+# 在图中间添加详细的统计信息
+text(0, 0, 
+     paste0("Mean eccDNA Density per Mb\n",
+            "Tumor: ", mean_tumor_density, "\n",
+            "Normal: ", mean_normal_density, "\n",
+            "Tumor >1Mb: ", count_1mb_tumor, "\n",
+            "Normal >1Mb: ", count_1mb_normal),
+     cex = 1.0,
+     font = 2,
+     col = "black")
+
+# 添加简化的图例
+legend("bottomright", 
+       legend = c("Normal density", "Tumor density", 
+                 paste0("Normal >1Mb (", count_1mb_normal, ")"),
+                 paste0("Tumor >1Mb (", count_1mb_tumor, ")")), 
+       fill = c(rgb(39, 98, 174, maxColorValue = 255, alpha = 200),
+               rgb(231, 27, 28, maxColorValue = 255, alpha = 200),
+               rgb(39, 98, 174, maxColorValue = 255, alpha = 150),
+               rgb(231, 27, 28, maxColorValue = 255, alpha = 150)),
+       border = rep("black", 1),
+       lwd = c(1, 1, 2, 2),
+       bty = "n", 
+       cex = 0.8)
+
+circos.clear()
+dev.off()
+
+# 处理Stage分组
+stage12_samples <- group_data$Person[group_data$Stage %in% c(1, 2) & !is.na(group_data$Stage) & !is.na(group_data$Person)]
+stage34_samples <- group_data$Person[group_data$Stage %in% c(3, 4) & !is.na(group_data$Stage) & !is.na(group_data$Person)]
+n_stage12 <- length(stage12_samples)
+n_stage34 <- length(stage34_samples)
+
+stage12_density <- convert_bed_to_density(file.path(output_dir, "eccDNA.stage12.bed"), n_stage12)
+stage34_density <- convert_bed_to_density(file.path(output_dir, "eccDNA.stage34.bed"), n_stage34)
+
+
+  mean_stage12_density <- round(mean(stage12_density$density), 1)
+  mean_stage34_density <- round(mean(stage34_density$density), 1)
+  
+  # 提取Stage分组中的大跨度eccDNA
+  length_thresholds <- c(50000000)  # 基于实际分布调整 50Mb
+  stage12_large_eccdna <- extract_large_eccdna(file.path(output_dir, "eccDNA.stage12.bed"), length_thresholds, "Stage12")
+  stage34_large_eccdna <- extract_large_eccdna(file.path(output_dir, "eccDNA.stage34.bed"), length_thresholds, "Stage34")
+  
+  # 生成Stage分组的circos图
+  cat("\n生成Stage分组circos图...\n")
+  pdf(file.path(output_dir, "circos_Stage_large_eccdna.pdf"), width = 10, height = 10)
+  
+  # 全局参数设置
+  circos.clear()
+  circos.par(start.degree = 90, gap.degree = 2.5, track.height = 0.08)
+  
+  # 初始化染色体
+  circos.initialize(factors = chr_basic$chr, xlim = cbind(0, chr_basic$end))
+  
+  # 染色体标签
+  circos.track(track.index = 1, ylim = c(0,1), bg.border = NA,
+               panel.fun = function(x, y){
+                 chr <- CELL_META$sector.index
+                 circos.text(CELL_META$xcenter, -0.4, chr,
+                             facing = "outside", cex = 1.2,
+                             col = "grey20", font = 2)
+               })
+  
+  # 画cytoband轨道
+  circos.track(track.index = 2, ylim = c(0,1), bg.border = NA,
+               panel.fun = function(x, y) {
+                 chr <- CELL_META$sector.index
+                 cb <- cytoband[cytoband$chr == chr, ]
+                 for(i in seq_len(nrow(cb))){  
+                   circos.rect(cb$start[i], 0, cb$end[i], 1,
+                               col = stain_col[cb$gieStain[i]],
+                               border = NA)
+                 }
+               })
+  
+  # 定义颜色（符合Cell Report高级配色）
+  color_stage12 <- rgb(114, 158, 206, maxColorValue = 255)  # 天蓝色
+  color_stage34 <- rgb(244, 109, 67, maxColorValue = 255)   # 橙色
+  
+   # 绘制Stage 3-4密度图
+  max_stage34_density <- max(stage34_density$density) * 1.2
+  circos.genomicTrackPlotRegion(
+    stage34_density,
+    ylim = c(0, max_stage34_density),
+    track.height = 0.08,
+    bg.border = "black",
+    panel.fun = function(region, value, ...) {
+      circos.genomicRect(region, value, ytop = value$density, ybottom = 0,
+                        col = rgb(244, 109, 67, maxColorValue = 255, alpha = 200),
+                        border = color_stage34)
+      circos.genomicLines(region, value, col = color_stage34,
+                        lwd = 2)
+    }
+  )
+  # 绘制Stage 1-2密度图
+  max_stage12_density <- max(stage12_density$density) * 1.2
+  circos.genomicTrackPlotRegion(
+    stage12_density,
+    ylim = c(0, max_stage12_density),
+    track.height = 0.08,
+    bg.border = "black",
+    panel.fun = function(region, value, ...) {
+      circos.genomicRect(region, value, ytop = value$density, ybottom = 0,
+                        col = rgb(114, 158, 206, maxColorValue = 255, alpha = 200),
+                        border = color_stage12)
+      circos.genomicLines(region, value, col = color_stage12,
+                        lwd = 2)
+    }
+  )
+  
+ 
+  
+  # 绘制大跨度eccDNA弧线
+  cat("绘制Stage分组大跨度eccDNA弧线...\n")
+    smart_draw_links(stage34_large_eccdna, "5e+07", 
+                  rgb(244, 109, 67, maxColorValue = 255), 
+                  lwd = 0.8)
+  smart_draw_links(stage12_large_eccdna, "5e+07", 
+                  rgb(114, 158, 206, maxColorValue = 255), 
+                  lwd = 0.8)
+
+  
+  # 计算各种长度阈值的数量
+  count_1mb_stage12 <- ifelse("gt_5e+07" %in% names(stage12_large_eccdna), nrow(stage12_large_eccdna$`gt_5e+07`), 0)
+  count_1mb_stage34 <- ifelse("gt_5e+07" %in% names(stage34_large_eccdna), nrow(stage34_large_eccdna$`gt_5e+07`), 0)
+  
+  # 在图中间添加详细的统计信息
+  text(0, 0, 
+       paste0("Mean eccDNA Density per Mb\n",
+              "Stage 1-2: ", mean_stage12_density, "\n",
+              "Stage 3-4: ", mean_stage34_density, "\n"
+             ),
+       cex = 1.0,
+       font = 2,
+       col = "black")
+  
+  # 添加简化的图例
+  legend("bottomright", 
+         legend = c("Stage 1-2 density", "Stage 3-4 density", 
+                   paste0("Stage 1-2 >50Mb (", count_1mb_stage12, ")"),
+                   paste0("Stage 3-4 >50Mb (", count_1mb_stage34, ")")), 
+         fill = c(rgb(114, 158, 206, maxColorValue = 255, alpha = 200),
+                 rgb(244, 109, 67, maxColorValue = 255, alpha = 200),
+                 rgb(114, 158, 206, maxColorValue = 255, alpha = 150),
+                 rgb(244, 109, 67, maxColorValue = 255, alpha = 150)),
+         border = rep("black", 1),
+         lwd = c(1, 1, 2, 2),
+         bty = "n", 
+         cex = 0.8)
+  
+  circos.clear()
+  dev.off()
+
+
+# 处理Metastasis分组
+metastasis_samples <- group_data$Person[group_data$Metastasis == "M" & !is.na(group_data$Metastasis) & !is.na(group_data$Person)]
+primary_samples <- group_data$Person[group_data$Metastasis == "T" & !is.na(group_data$Metastasis) & !is.na(group_data$Person)]
+n_metastasis <- length(metastasis_samples)
+n_primary <- length(primary_samples)
+
+metastasis_density <- convert_bed_to_density(file.path(output_dir, "eccDNA.Metastasis.bed"), n_metastasis)
+primary_density <- convert_bed_to_density(file.path(output_dir, "eccDNA.Primary.bed"), n_primary)
+
+
+  mean_metastasis_density <- round(mean(metastasis_density$density), 1)
+  mean_primary_density <- round(mean(primary_density$density), 1)
+  
+  # 提取Metastasis分组中的大跨度eccDNA
+  metastasis_large_eccdna <- extract_large_eccdna(file.path(output_dir, "eccDNA.Metastasis.bed"), length_thresholds, "Metastasis")
+  primary_large_eccdna <- extract_large_eccdna(file.path(output_dir, "eccDNA.Primary.bed"), length_thresholds, "Primary")
+  
+  # 生成Metastasis分组的circos图
+  cat("\n生成Metastasis分组circos图...\n")
+  pdf(file.path(output_dir, "circos_Metastasis_large_eccdna.pdf"), width = 10, height = 10)
+  
+  # 全局参数设置
+  circos.clear()
+  circos.par(start.degree = 90, gap.degree = 2.5, track.height = 0.08)
+  
+  # 初始化染色体
+  circos.initialize(factors = chr_basic$chr, xlim = cbind(0, chr_basic$end))
+  
+  # 染色体标签
+  circos.track(track.index = 1, ylim = c(0,1), bg.border = NA,
+               panel.fun = function(x, y){
+                 chr <- CELL_META$sector.index
+                 circos.text(CELL_META$xcenter, -0.4, chr,
+                             facing = "outside", cex = 1.2,
+                             col = "grey20", font = 2)
+               })
+  
+  # 画cytoband轨道
+  circos.track(track.index = 2, ylim = c(0,1), bg.border = NA,
+               panel.fun = function(x, y) {
+                 chr <- CELL_META$sector.index
+                 cb <- cytoband[cytoband$chr == chr, ]
+                 for(i in seq_len(nrow(cb))){  
+                   circos.rect(cb$start[i], 0, cb$end[i], 1,
+                               col = stain_col[cb$gieStain[i]],
+                               border = NA)
+                 }
+               })
+  
+  # 定义颜色（符合Cell Report高级配色）
+  color_primary <- rgb(65, 171, 93, maxColorValue = 255)      # 深绿色
+  color_metastasis <- rgb(153, 102, 255, maxColorValue = 255)  # 紫色
+  
+
+   
+  # 绘制Metastasis密度图
+  max_metastasis_density <- max(metastasis_density$density) * 1.2
+  circos.genomicTrackPlotRegion(
+    metastasis_density,
+    ylim = c(0, max_metastasis_density),
+    track.height = 0.08,
+    bg.border = "black",
+    panel.fun = function(region, value, ...) {
+      circos.genomicRect(region, value, ytop = value$density, ybottom = 0,
+                        col = rgb(153, 102, 255, maxColorValue = 255, alpha = 200),
+                        border = color_metastasis)
+      circos.genomicLines(region, value, col = color_metastasis,
+                        lwd = 2)
+    }
+  )
+  # 绘制Primary密度图
+  max_primary_density <- max(primary_density$density) * 1.2
+  circos.genomicTrackPlotRegion(
+    primary_density,
+    ylim = c(0, max_primary_density),
+    track.height = 0.08,
+    bg.border = "black",
+    panel.fun = function(region, value, ...) {
+      circos.genomicRect(region, value, ytop = value$density, ybottom = 0,
+                        col = rgb(65, 171, 93, maxColorValue = 255, alpha = 200),
+                        border = color_primary)
+      circos.genomicLines(region, value, col = color_primary,
+                        lwd = 2)
+    }
+  )
+ 
+  
+  # 绘制大跨度eccDNA弧线
+  cat("绘制Metastasis分组大跨度eccDNA弧线...\n")
+    smart_draw_links(metastasis_large_eccdna, "5e+07", 
+                  rgb(153, 102, 255, maxColorValue = 255), 
+                  lwd = 0.8)
+  
+  smart_draw_links(primary_large_eccdna, "5e+07", 
+                  rgb(65, 171, 93, maxColorValue = 255), 
+                  lwd = 0.8)
+
+  # 计算各种长度阈值的数量
+  count_1mb_primary <- ifelse("gt_5e+07" %in% names(primary_large_eccdna), nrow(primary_large_eccdna$`gt_5e+07`), 0)
+  count_1mb_metastasis <- ifelse("gt_5e+07" %in% names(metastasis_large_eccdna), nrow(metastasis_large_eccdna$`gt_5e+07`), 0)
+  
+  # 在图中间添加详细的统计信息
+  text(0, 0, 
+       paste0("Mean eccDNA Density per Mb\n",
+              "Primary: ", mean_primary_density, "\n",
+              "Metastasis: ", mean_metastasis_density, "\n",
+              "Primary >50Mb: ", count_1mb_primary, "\n",
+              "Metastasis >50Mb: ", count_1mb_metastasis),
+       cex = 1.0,
+       font = 2,
+       col = "black")
+  
+  # 添加简化的图例
+  legend("bottomright", 
+         legend = c("Primary density", "Metastasis density", 
+                   paste0("Primary >50Mb (", count_1mb_primary, ")"),
+                   paste0("Metastasis >50Mb (", count_1mb_metastasis, ")")), 
+         fill = c(rgb(65, 171, 93, maxColorValue = 255, alpha = 200),
+                 rgb(153, 102, 255, maxColorValue = 255, alpha = 200),
+                 rgb(65, 171, 93, maxColorValue = 255, alpha = 150),
+                 rgb(153, 102, 255, maxColorValue = 255, alpha = 150)),
+         border = rep("black", 1),
+         lwd = c(1, 1, 2, 2),
+         bty = "n", 
+         cex = 0.8)
+  
+  circos.clear()
+  dev.off()
